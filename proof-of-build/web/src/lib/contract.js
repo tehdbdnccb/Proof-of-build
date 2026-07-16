@@ -20,6 +20,44 @@ function getProvider() {
   return providerInstance;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Lightweight rate limiter for RPC calls.
+ *
+ * Tracks the timestamp of the last request. Before issuing a new request,
+ * if less than `minInterval` has elapsed since the last one, it sleeps the
+ * difference. There is no queue — each caller sleeps independently if it
+ * needs to, so calls made in parallel (e.g. via Promise.all) still proceed
+ * concurrently once they've each waited their own turn, instead of being
+ * serialized one after another.
+ */
+class RateLimiter {
+  constructor(maxRequestsPerSecond) {
+    this.minInterval = 1000 / maxRequestsPerSecond;
+    this.lastRequestTime = 0;
+  }
+
+  async throttle() {
+    const now = Date.now();
+    const elapsed = now - this.lastRequestTime;
+    if (elapsed < this.minInterval) {
+      await sleep(this.minInterval - elapsed);
+    }
+    this.lastRequestTime = Date.now();
+  }
+}
+
+// Monad RPC nodes cap requests at 25/sec — stay comfortably under that.
+const rateLimiter = new RateLimiter(25);
+
+async function fetchChunk(contract, filter, fromBlock, toBlock) {
+  await rateLimiter.throttle();
+  return contract.queryFilter(filter, fromBlock, toBlock);
+}
+
 export function getContract() {
   return new Contract(CONTRACT_ADDRESS, ABI, getProvider());
 }
@@ -51,7 +89,7 @@ export async function fetchHistory(address) {
   
   for (let fromBlock = 0; fromBlock <= latestBlockNumber; fromBlock += CHUNK_SIZE) {
     const toBlock = Math.min(fromBlock + CHUNK_SIZE - 1, latestBlockNumber);
-    chunks.push(contract.queryFilter(filter, fromBlock, toBlock));
+    chunks.push(fetchChunk(contract, filter, fromBlock, toBlock));
   }
   
   // Fetch all chunks in parallel
