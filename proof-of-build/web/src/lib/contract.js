@@ -29,10 +29,9 @@ function sleep(ms) {
  *
  * Tracks the timestamp of the last request. Before issuing a new request,
  * if less than `minInterval` has elapsed since the last one, it sleeps the
- * difference. There is no queue — each caller sleeps independently if it
- * needs to, so calls made in parallel (e.g. via Promise.all) still proceed
- * concurrently once they've each waited their own turn, instead of being
- * serialized one after another.
+ * difference. Requests are issued sequentially (never batched via
+ * Promise.all) so that each queryFilter call goes out as its own JSON-RPC
+ * request — some RPC providers (e.g. Ankr) reject batched requests outright.
  */
 class RateLimiter {
   constructor(maxRequestsPerSecond) {
@@ -72,7 +71,15 @@ export function getContract() {
  * same data. This is what makes the "view on explorer" links actually work.
  *
  * Note: queryFilter with a 0-to-latest range can exceed RPC node limits (e.g. 100-block range).
- * We paginate in chunks and fetch in parallel for speed.
+ * We paginate in chunks and fetch them sequentially, one request at a time.
+ *
+ * Chunks are intentionally NOT fetched with Promise.all — some RPC providers
+ * (e.g. Ankr) bundle concurrent requests from ethers.js into a single JSON-RPC
+ * batch POST, and reject oversized batches with error -32062 ("Batch size too
+ * large"). Fetching sequentially guarantees each queryFilter call is sent as
+ * its own request. The rate limiter still caps us at 25 req/sec so this stays
+ * well within provider rate limits while remaining fast (~1-2s for a full
+ * history).
  */
 export async function fetchHistory(address) {
   const contract = getContract();
@@ -83,18 +90,14 @@ export async function fetchHistory(address) {
   const latestBlockNumber = await provider.getBlockNumber();
   
   // Fetch events in 100-block chunks to respect RPC node limits
-  // Use Promise.all to fetch chunks in parallel for speed
   const CHUNK_SIZE = 100;
-  const chunks = [];
-  
+  const allEvents = [];
+
   for (let fromBlock = 0; fromBlock <= latestBlockNumber; fromBlock += CHUNK_SIZE) {
     const toBlock = Math.min(fromBlock + CHUNK_SIZE - 1, latestBlockNumber);
-    chunks.push(fetchChunk(contract, filter, fromBlock, toBlock));
+    const events = await fetchChunk(contract, filter, fromBlock, toBlock);
+    allEvents.push(...events);
   }
-  
-  // Fetch all chunks in parallel
-  const results = await Promise.all(chunks);
-  const allEvents = results.flat();
 
   return allEvents
     .map((event) => ({
