@@ -57,6 +57,46 @@ async function fetchChunk(contract, filter, fromBlock, toBlock) {
   return contract.queryFilter(filter, fromBlock, toBlock);
 }
 
+async function hasCode(provider, address, blockNumber) {
+  await rateLimiter.throttle();
+  const code = await provider.getCode(address, blockNumber);
+  return code !== "0x" && code !== "0x0";
+}
+
+/**
+ * Binary search for the block in which the contract was deployed.
+ *
+ * Some RPC providers (e.g. Ankr) run archive nodes with limited historical
+ * range and respond with error -32603 when eth_getLogs is queried from block
+ * 0 on a chain with a long history. Rather than always starting event
+ * queries at genesis, we binary search for the earliest block at which the
+ * contract has code deployed, and use that as our starting point instead.
+ * This costs 1-2 extra getCode() calls up front but avoids ever touching
+ * block ranges the archive node can't serve.
+ */
+async function findDeploymentBlock(provider, address, latestBlockNumber) {
+  const deployed = await hasCode(provider, address, latestBlockNumber);
+  if (!deployed) {
+    // Contract doesn't exist (yet) at the latest block — nothing to search for.
+    return latestBlockNumber;
+  }
+
+  let low = 0;
+  let high = latestBlockNumber;
+
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    const codeAtMid = await hasCode(provider, address, mid);
+    if (codeAtMid) {
+      high = mid;
+    } else {
+      low = mid + 1;
+    }
+  }
+
+  return low;
+}
+
 export function getContract() {
   return new Contract(CONTRACT_ADDRESS, ABI, getProvider());
 }
@@ -80,6 +120,14 @@ export function getContract() {
  * its own request. The rate limiter still caps us at 25 req/sec so this stays
  * well within provider rate limits while remaining fast (~1-2s for a full
  * history).
+ *
+ * We also never query from block 0. Some RPC providers (e.g. Ankr) run
+ * archive nodes with limited historical range, and eth_getLogs from genesis
+ * fails with error -32603 on chains with a long history. Instead, we binary
+ * search for the contract's deployment block (a couple of getCode() calls)
+ * and start pagination there — padded back by a small safety margin in case
+ * the contract was deployed mid-way through a re-org window — rather than
+ * scanning block ranges that never contained the contract at all.
  */
 export async function fetchHistory(address) {
   const contract = getContract();
@@ -88,12 +136,20 @@ export async function fetchHistory(address) {
   
   // Get the latest block number
   const latestBlockNumber = await provider.getBlockNumber();
+
+  // Find the contract's deployment block so we never query history that
+  // predates it (and that the archive node may not be able to serve).
+  const deploymentBlock = await findDeploymentBlock(provider, address, latestBlockNumber);
+
+  // Start slightly before the deployment block as a safety margin.
+  const SAFETY_MARGIN = 1000;
+  const startBlock = Math.max(0, deploymentBlock - SAFETY_MARGIN);
   
   // Fetch events in 50-block chunks to reduce archive/trie load on RPC node
   const CHUNK_SIZE = 50;
   const allEvents = [];
 
-  for (let fromBlock = 0; fromBlock <= latestBlockNumber; fromBlock += CHUNK_SIZE) {
+  for (let fromBlock = startBlock; fromBlock <= latestBlockNumber; fromBlock += CHUNK_SIZE) {
     const toBlock = Math.min(fromBlock + CHUNK_SIZE - 1, latestBlockNumber);
     const events = await fetchChunk(contract, filter, fromBlock, toBlock);
     allEvents.push(...events);
