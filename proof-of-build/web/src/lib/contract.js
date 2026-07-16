@@ -11,6 +11,47 @@ const ABI = [
   "event Anchored(address indexed builder, uint256 indexed index, bytes32 commitHash, uint64 timestamp, string label)",
 ];
 
+/**
+ * Simple token-spacing rate limiter.
+ *
+ * Pagination fires many queryFilter() calls with Promise.all(), which bursts
+ * requests at the RPC node all at once. Public RPC endpoints cap requests
+ * per second (e.g. ~25 req/s), so a burst of dozens of parallel calls can
+ * trip rate limiting and fail the whole page load.
+ *
+ * schedule() queues callers and releases them at a fixed interval so calls
+ * are spaced out evenly across time instead of firing simultaneously, while
+ * still resolving as soon as the RPC allows the next slot — no need to await
+ * one full round-trip before starting the next request.
+ */
+class RateLimiter {
+  constructor(maxRequestsPerSecond) {
+    this.minIntervalMs = 1000 / maxRequestsPerSecond;
+    this.lastScheduledAt = 0;
+    this.queue = Promise.resolve();
+  }
+
+  schedule(fn) {
+    let release;
+    const gate = new Promise((resolve) => {
+      release = resolve;
+    });
+
+    this.queue = this.queue.then(() => {
+      const now = Date.now();
+      const wait = Math.max(0, this.lastScheduledAt + this.minIntervalMs - now);
+      this.lastScheduledAt = Math.max(now, this.lastScheduledAt + this.minIntervalMs);
+      return new Promise((resolve) => setTimeout(resolve, wait)).then(release);
+    });
+
+    return gate.then(fn);
+  }
+}
+
+// Ankr's public Monad testnet RPC allows 300 requests / 10s (30 req/s).
+// We cap slightly below that to leave headroom for other concurrent traffic.
+const rpcRateLimiter = new RateLimiter(25);
+
 let providerInstance = null;
 
 function getProvider() {
@@ -51,7 +92,9 @@ export async function fetchHistory(address) {
   
   for (let fromBlock = 0; fromBlock <= latestBlockNumber; fromBlock += CHUNK_SIZE) {
     const toBlock = Math.min(fromBlock + CHUNK_SIZE - 1, latestBlockNumber);
-    chunks.push(contract.queryFilter(filter, fromBlock, toBlock));
+    chunks.push(
+      rpcRateLimiter.schedule(() => contract.queryFilter(filter, fromBlock, toBlock))
+    );
   }
   
   // Fetch all chunks in parallel
