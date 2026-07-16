@@ -32,13 +32,29 @@ export function getContract() {
  * The Anchored event is emitted on every anchor() call, so we read the event
  * log instead, which gives us `event.transactionHash` for free alongside the
  * same data. This is what makes the "view on explorer" links actually work.
+ *
+ * Note: queryFilter with a 0-to-latest range can exceed RPC node limits (e.g. 100-block range).
+ * We paginate in chunks to work around this.
  */
 export async function fetchHistory(address) {
   const contract = getContract();
+  const provider = getProvider();
   const filter = contract.filters.Anchored(address);
-  const events = await contract.queryFilter(filter, 0, "latest");
+  
+  // Get the latest block number
+  const latestBlockNumber = await provider.getBlockNumber();
+  
+  // Fetch events in 100-block chunks to respect RPC node limits
+  const CHUNK_SIZE = 100;
+  const allEvents = [];
+  
+  for (let fromBlock = 0; fromBlock <= latestBlockNumber; fromBlock += CHUNK_SIZE) {
+    const toBlock = Math.min(fromBlock + CHUNK_SIZE - 1, latestBlockNumber);
+    const events = await contract.queryFilter(filter, fromBlock, toBlock);
+    allEvents.push(...events);
+  }
 
-  return events
+  return allEvents
     .map((event) => ({
       commitHash: event.args.commitHash,
       timestamp: Number(event.args.timestamp) * 1000, // ms for JS Date
@@ -47,3 +63,4 @@ export async function fetchHistory(address) {
     }))
     .sort((a, b) => a.timestamp - b.timestamp);
 }
+
