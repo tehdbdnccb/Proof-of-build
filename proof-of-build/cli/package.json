@@ -1,0 +1,13 @@
+{
+  "name": "proof-of-build-cli",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Anchors the current git commit on-chain via the ProofOfBuild contract.",
+  "main": "anchor.js",
+  "scripts": {
+    "anchor": "node anchor.js"
+  },
+  "dependencies": {
+    "ethers": "^6.13.0"
+  }
+}

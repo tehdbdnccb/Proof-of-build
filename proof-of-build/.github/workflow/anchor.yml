@@ -1,0 +1,31 @@
+name: Anchor commit on Monad
+
+on:
+  push:
+    branches: ["**"]
+
+jobs:
+  anchor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install CLI dependencies
+        working-directory: cli
+        run: npm install
+
+      - name: Anchor this commit
+        working-directory: cli
+        env:
+          MONAD_RPC_URL: ${{ secrets.MONAD_RPC_URL }}
+          ANCHOR_PRIVATE_KEY: ${{ secrets.ANCHOR_PRIVATE_KEY }}
+          PROOF_OF_BUILD_ADDRESS: ${{ secrets.PROOF_OF_BUILD_ADDRESS }}
+        run: node anchor.js "${{ github.event.head_commit.message }}"
