@@ -34,7 +34,7 @@ export function getContract() {
  * same data. This is what makes the "view on explorer" links actually work.
  *
  * Note: queryFilter with a 0-to-latest range can exceed RPC node limits (e.g. 100-block range).
- * We paginate in chunks to work around this.
+ * We paginate in chunks and fetch in parallel for speed.
  */
 export async function fetchHistory(address) {
   const contract = getContract();
@@ -45,14 +45,18 @@ export async function fetchHistory(address) {
   const latestBlockNumber = await provider.getBlockNumber();
   
   // Fetch events in 100-block chunks to respect RPC node limits
+  // Use Promise.all to fetch chunks in parallel for speed
   const CHUNK_SIZE = 100;
-  const allEvents = [];
+  const chunks = [];
   
   for (let fromBlock = 0; fromBlock <= latestBlockNumber; fromBlock += CHUNK_SIZE) {
     const toBlock = Math.min(fromBlock + CHUNK_SIZE - 1, latestBlockNumber);
-    const events = await contract.queryFilter(filter, fromBlock, toBlock);
-    allEvents.push(...events);
+    chunks.push(contract.queryFilter(filter, fromBlock, toBlock));
   }
+  
+  // Fetch all chunks in parallel
+  const results = await Promise.all(chunks);
+  const allEvents = results.flat();
 
   return allEvents
     .map((event) => ({
