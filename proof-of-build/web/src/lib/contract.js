@@ -89,8 +89,8 @@ export async function fetchHistory(address) {
   // Get the latest block number
   const latestBlockNumber = await provider.getBlockNumber();
   
-  // Fetch events in 100-block chunks to respect RPC node limits
-  const CHUNK_SIZE = 100;
+  // Fetch events in 50-block chunks to reduce archive/trie load on RPC node
+  const CHUNK_SIZE = 50;
   const allEvents = [];
 
   for (let fromBlock = 0; fromBlock <= latestBlockNumber; fromBlock += CHUNK_SIZE) {
